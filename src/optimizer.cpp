@@ -6,6 +6,7 @@
 #include <map>
 #include <set>
 #include <unordered_set>
+#include <cstdlib>
 
 #include "optimizer.h"
 
@@ -16,6 +17,46 @@ using namespace std;
 #define MIN_CUBE_PRUNING_SIZE 20
 
 namespace EnsembleDesign {
+
+namespace {
+
+int g_pair_block_p1 = -1; // 1-based inclusive
+int g_pair_block_p2 = -1; // 1-based inclusive
+bool g_pair_block_enabled = false;
+
+void init_pair_block_params(IndexType seq_length) {
+    const char* p1_env = std::getenv("PAIR_BLOCK_P1");
+    const char* p2_env = std::getenv("PAIR_BLOCK_P2");
+    if (!p1_env || !p2_env) {
+        g_pair_block_enabled = false;
+        return;
+    }
+    int p1 = std::atoi(p1_env);
+    int p2 = std::atoi(p2_env);
+    if (p1 < 1 || p2 < 1) {
+        g_pair_block_enabled = false;
+        return;
+    }
+    if (p1 > seq_length) p1 = seq_length;
+    if (p2 > seq_length) p2 = seq_length;
+    if (p1 > p2) {
+        g_pair_block_enabled = false;
+        return;
+    }
+    g_pair_block_p1 = p1;
+    g_pair_block_p2 = p2;
+    g_pair_block_enabled = true;
+}
+
+inline bool pair_blocked(IndexType i, IndexType j) {
+    if (!g_pair_block_enabled) return false;
+    if (i > j) std::swap(i, j);
+    int i1 = static_cast<int>(i) + 1;
+    int j1 = static_cast<int>(j) + 1;
+    return (i1 <= g_pair_block_p1) && (j1 >= g_pair_block_p2);
+}
+
+} // namespace
 
 template <PhaseOption phase>
 void Optimizer::hairpin_beam(IndexType j, IndexType j_num, DFA_t& dfa) {
@@ -47,6 +88,7 @@ void Optimizer::hairpin_beam(IndexType j, IndexType j_num, DFA_t& dfa) {
                 IndexType jnext = jnext_node.first;
                 IndexType hairpin_length = jnext + 1 - j; //special hairpin
 
+                if (pair_blocked(j, jnext)) continue;
                 NucPairType pair_nuc = NTP(j_nuc, jnext_nuc);
 
 #ifdef SPECIAL_HP // TODO
@@ -128,6 +170,7 @@ void Optimizer::hairpin_beam(IndexType j, IndexType j_num, DFA_t& dfa) {
                     IndexType jnext = jnext_node.first;
                     IndexType hairpin_length = jnext + 1 - i;
 
+                    if (pair_blocked(i, jnext)) continue;
                     NucPairType  pair_nuc_i_jnext = NTP(i_nuc, jnext_nuc);
 
 #ifdef SPECIAL_HP // TODO
@@ -236,6 +279,7 @@ void Optimizer::Multi_beam(IndexType j, IndexType j_num, DFA_t& dfa){
 
                         Parameters params = {jnext_param};
 
+                        if (pair_blocked(i, jnext)) continue;
                         NucPairType pair_nuc_i_jnext = NTP(i_nuc, jnext_nuc);
 
                         update_state<phase>(bestMulti[jnext1_node][i_node][pair_nuc_i_jnext], state_Multi, 0, params, state_Multi.pre_node);
@@ -284,6 +328,7 @@ void Optimizer::P_beam(IndexType j, IndexType j_num, DFA_t& dfa){
                         const auto &i_1_node = std::get<0>(*i_ledge_ptr);
                         const auto &i_1_nuc = std::get<2>(*i_ledge_ptr);
                         const auto &i_1_param = std::get<3>(*i_ledge_ptr);
+                        if (pair_blocked(i_1_node.first, j)) continue;
                         auto outer_pair = NTP(i_1_nuc, j_nuc);
                         if (_allowed_pairs[i_1_nuc][j_nuc]) {
                             ScoreType score_stacking = stacking_score[outer_pair - 1][pair_nuc - 1] / kT;
@@ -316,6 +361,7 @@ void Optimizer::P_beam(IndexType j, IndexType j_num, DFA_t& dfa){
 
                             auto q_nuc = std::get<1>(q_node_nuc_param);
                             const auto &q_param = std::get<2>(q_node_nuc_param);
+                            if (pair_blocked(i_1_node.first, q)) continue;
                             auto outer_pair = NTP(i_1_nuc, q_nuc);
 
                             for (const auto &q1_node2redges: dfa.auxiliary_right_edges[q_node]) {
@@ -364,10 +410,11 @@ void Optimizer::P_beam(IndexType j, IndexType j_num, DFA_t& dfa){
                                 const auto &p_1_nuc_ = std::get<2>(*p_ledge_ptr);
                                 if (p_1_nuc != p_1_nuc_) continue;
 
-                                const auto &p_1_node = std::get<0>(*p_ledge_ptr);
-                                const auto &p_1_param = std::get<3>(*p_ledge_ptr);
+                                    const auto &p_1_node = std::get<0>(*p_ledge_ptr);
+                                    const auto &p_1_param = std::get<3>(*p_ledge_ptr);
 
-                                ScoreType score_bulge = bulge_score[outer_pair - 1][pair_nuc - 1][i - p - 1] / kT;
+                                    if (pair_blocked(p_1_node.first, j)) continue;
+                                    ScoreType score_bulge = bulge_score[outer_pair - 1][pair_nuc - 1][i - p - 1] / kT;
                                 Parameters params = {p_1_param, j_param};
 
                                 update_state<phase>(bestP[j1_node][p_1_node][outer_pair], state_P, score_bulge, params);
@@ -442,6 +489,7 @@ void Optimizer::P_beam(IndexType j, IndexType j_num, DFA_t& dfa){
                                                     q_nuc != q_nuc_)
                                                     continue;
 
+                                                if (pair_blocked(p_1_node.first, q)) continue;
                                                 auto &new_state_P = bestP[q1_node][p_1_node][NTP(p_1_nuc, q_nuc)];
 
                                                 // p_1 p ... i_1 i ... j_1 j ... q_1 q
@@ -643,6 +691,7 @@ void Optimizer::M2_beam(IndexType j, IndexType j_num, DFA_t& dfa){
                         IndexType q = q_node.first;
 
                         if (i - p + q - j - 1 > SINGLE_MAX_LEN) continue; //ZL, i-p-1+q-j
+                        if (pair_blocked(p_node.first, q)) continue;
                         auto outer_pair = NTP(p_nuc, q_nuc);
                         for (const auto& q_redge_ptr : dfa.right_edges[q_node]){
                             const auto& q_nuc_ = std::get<2>(*q_redge_ptr);
@@ -1109,6 +1158,7 @@ void Optimizer::optimize(
     best_path_in_one_codon_unit = best_path_in_one_codon;
 
     seq_length = 3 * static_cast<IndexType>(aa_seq.size());
+    init_pair_block_params(seq_length);
     next_pair.resize(NOTON);
     next_pair_set.resize(NOTON);
     get_next_pair(dfa);
